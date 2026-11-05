@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Diagnostics;
+using System.Globalization;
 using System.Security.Authentication;
 using Downloader;
 
@@ -7,6 +10,10 @@ public class DownloaderHelper
 {
     private static readonly Lazy<DownloaderHelper> _instance = new(() => new());
     public static DownloaderHelper Instance => _instance.Value;
+
+    private static readonly TimeSpan SpeedWarmup = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SpeedReportInterval = TimeSpan.FromSeconds(1);
+    private const int SpeedReadBufferSize = 64 * 1024;
 
     public async Task<string?> DownloadStringAsync(IWebProxy? webProxy, string url, string? userAgent,
         IReadOnlyDictionary<string, string>? requestHeaders = null, string? acceptHeader = null, CancellationToken cancellationToken = default)
@@ -54,7 +61,14 @@ public class DownloaderHelper
         return await reader.ReadToEndAsync(cancellationToken);
     }
 
-    public async Task DownloadDataAsync4Speed(IWebProxy webProxy, string url, Action<string> onProgress, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// 测速下载：自行流式读取响应并统计字节数。
+    /// 速度 = 预热结束后的平均值（十进制 MB/s）。
+    /// 每秒通过 onProgress 上报一次平均速度，结束时再上报一次最终值；失败时上报错误信息。
+    /// duration 到期视为正常结束；cancellationToken 取消则直接抛出。
+    /// </summary>
+    public async Task DownloadDataAsync4Speed(IWebProxy webProxy, string url, Func<string, Task> onProgress,
+        TimeSpan duration, CancellationToken cancellationToken = default)
     {
         if (url.IsNullOrEmpty())
         {
@@ -66,56 +80,81 @@ public class DownloaderHelper
             ConnectTimeout = GetConnectTimeoutMs(true),
             Proxy = webProxy
         };
-        var downloadOpt = new DownloadConfiguration()
+
+        using var client = new HttpClient(GetSocketsHttpHandler(requestConfiguration), disposeHandler: true)
         {
-            MaxTryAgainOnFailure = 2,
-            RequestConfiguration = requestConfiguration,
-            CustomHttpMessageHandlerFactory = () => GetSocketsHttpHandler(requestConfiguration),
+            Timeout = Timeout.InfiniteTimeSpan,
         };
 
-        var lastUpdateTime = DateTime.Now;
-        var hasValue = false;
-        double maxSpeed = 0;
-        await using var downloader = new Downloader.DownloadService(downloadOpt);
+        using var timeoutCts = new CancellationTokenSource(duration);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+        var linkedToken = linkedCts.Token;
 
-        downloader.DownloadProgressChanged += (sender, value) =>
-        {
-            if (!(value.BytesPerSecondSpeed > 0))
-            {
-                return;
-            }
-            hasValue = true;
-            if (value.BytesPerSecondSpeed > maxSpeed)
-            {
-                maxSpeed = value.BytesPerSecondSpeed;
-            }
+        var meter = new SpeedMeter(SpeedWarmup);
+        var lastReport = TimeSpan.Zero;
+        string? error = null;
 
-            var ts = DateTime.Now - lastUpdateTime;
-            if (ts.TotalMilliseconds >= 1000)
-            {
-                lastUpdateTime = DateTime.Now;
-                var speed = (maxSpeed / 1000 / 1000).ToString("#0.0");
-                onProgress.Invoke(speed);
-            }
-        };
-        downloader.DownloadFileCompleted += (sender, value) =>
+        try
         {
-            if (hasValue && maxSpeed > 0)
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.UserAgent.TryParseAdd(Utils.GetVersion(false));
+
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedToken);
+            response.EnsureSuccessStatusCode();
+
+            await using var stream = await response.Content.ReadAsStreamAsync(linkedToken);
+
+            var buffer = ArrayPool<byte>.Shared.Rent(SpeedReadBufferSize);
+            try
             {
-                var finalSpeed = (maxSpeed / 1000 / 1000).ToString("#0.0");
-                onProgress.Invoke(finalSpeed);
+                while (true)
+                {
+                    var read = await stream.ReadAsync(buffer.AsMemory(0, SpeedReadBufferSize), linkedToken);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    meter.AddBytes(read);
+
+                    if (meter.Warmed && meter.Elapsed - lastReport >= SpeedReportInterval)
+                    {
+                        lastReport = meter.Elapsed;
+                        var avg = meter.AverageMBps();
+                        if (avg > 0)
+                        {
+                            await onProgress(avg.ToString("#0.0", CultureInfo.InvariantCulture));
+                        }
+                    }
+                }
             }
-            else if (value.Error != null)
+            finally
             {
-                onProgress.Invoke(value.Error?.Message);
+                ArrayPool<byte>.Shared.Return(buffer);
             }
-            else
-            {
-                onProgress.Invoke("0");
-            }
-        };
-        //progress.Invoke("......");
-        await using var stream = await downloader.DownloadFileTaskAsync(address: url, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // 测速时长到期，视为正常结束，使用已测得的平均速度
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        var final = meter.AverageMBps();
+        if (final > 0)
+        {
+            await onProgress(final.ToString("#0.0", CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            await onProgress(error ?? "0");
+        }
     }
 
     public async Task DownloadFileAsync(IWebProxy? webProxy, FileDownloadRequest request, Action<FileDownloadState> onProgress, CancellationToken cancellationToken = default)
@@ -336,5 +375,46 @@ public class DownloaderHelper
     private int GetConnectTimeoutMs(bool isProxy)
     {
         return (int)(isProxy ? Global.ProxyDownloadConnect : Global.DirectDownloadConnect).TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// 速度计量：统计字节数，速度取预热结束后的平均值。
+    /// 若预热前下载已结束，则回退为从开始计时的整体平均值。
+    /// </summary>
+    private sealed class SpeedMeter
+    {
+        private readonly Stopwatch _sw = Stopwatch.StartNew();
+        private readonly TimeSpan _warmup;
+        private long _total;
+        private long _baseBytes;
+        private TimeSpan _baseTime;
+
+        public SpeedMeter(TimeSpan warmup)
+        {
+            _warmup = warmup;
+        }
+
+        public bool Warmed { get; private set; }
+
+        public TimeSpan Elapsed => _sw.Elapsed;
+
+        public void AddBytes(long count)
+        {
+            _total += count;
+            if (!Warmed && _sw.Elapsed >= _warmup)
+            {
+                Warmed = true;
+                _baseBytes = _total;
+                _baseTime = _sw.Elapsed;
+            }
+        }
+
+        /// <summary>十进制 MB/s，与原显示保持一致（÷ 1,000,000）</summary>
+        public double AverageMBps()
+        {
+            var bytes = _total - _baseBytes;
+            var secs = (_sw.Elapsed - _baseTime).TotalSeconds;
+            return secs > 0 && bytes > 0 ? bytes / secs / 1_000_000d : 0;
+        }
     }
 }
