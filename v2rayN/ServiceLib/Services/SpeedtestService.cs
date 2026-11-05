@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Net.Http;
 using ServiceLib.UdpTest;
 
 namespace ServiceLib.Services;
@@ -275,7 +277,7 @@ public class SpeedtestService(Config config, Func<SpeedTestResult, Task> updateF
             }
             else
             {
-                await RunMixedTestAsync(lstSelected, completedIds, _config.SpeedTestItem.MixedConcurrencyCount, false, ct);
+                await RunMixedTestAsync(lstFailed, completedIds, _config.SpeedTestItem.MixedConcurrencyCount, false, ct);
             }
         }
     }
@@ -522,19 +524,18 @@ public class SpeedtestService(Config config, Func<SpeedTestResult, Task> updateF
 
         var webProxy = new WebProxy($"socks5://{Global.Loopback}:{it.Port}");
         var url = _config.SpeedTestItem.SpeedTestUrl;
-        var timeout = _config.SpeedTestItem.SpeedTestTimeout;
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeout));
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-        var linkedCt = linkedCts.Token;
+        var duration = TimeSpan.FromSeconds(_config.SpeedTestItem.SpeedTestTimeout);
+
         await downloadHandle.DownloadDataAsync(url, webProxy, async (success, msg) =>
         {
-            decimal.TryParse(msg, out var dec);
-            if (dec > 0)
+            // 下载层每秒上报平均速度，结束时上报最终平均值；失败时为错误信息
+            if (decimal.TryParse(msg, NumberStyles.Float, CultureInfo.InvariantCulture, out var dec) && dec > 0)
             {
                 ProfileExManager.Instance.SetTestSpeed(it.IndexId, dec);
             }
             await UpdateFunc(it.IndexId, "", msg);
-        }, linkedCt);
+        }, ct, duration);
+
         completedIds.TryAdd(it.IndexId, 0);
     }
 
