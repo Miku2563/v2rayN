@@ -18,21 +18,24 @@ public class DownloadService
     private static readonly string _tag = "DownloadService";
 
     /// <summary>
-    /// Downloads data with the specified proxy and reports progress messages.
+    /// Downloads data with the specified proxy and reports the average speed.
+    /// duration: 测速时长，到期视为正常结束；为空则不限时。
     /// </summary>
-    public async Task<int> DownloadDataAsync(string url, IWebProxy webProxy, Func<bool, string, Task> updateFunc, CancellationToken cancellationToken = default)
+    public async Task<int> DownloadDataAsync(string url, IWebProxy webProxy, Func<bool, string, Task> updateFunc,
+        CancellationToken cancellationToken = default, TimeSpan? duration = null)
     {
         try
         {
             await DownloaderHelper.Instance.DownloadDataAsync4Speed(webProxy,
-                  url,
-                  OnProgress,
-                  cancellationToken);
+                url,
+                OnProgress,
+                duration ?? Timeout.InfiniteTimeSpan,
+                cancellationToken);
 
-            void OnProgress(string message)
+            async Task OnProgress(string message)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                updateFunc.Invoke(false, $"{message}");
+                await updateFunc.Invoke(false, message);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
