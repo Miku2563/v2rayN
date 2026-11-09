@@ -532,31 +532,93 @@ public class SpeedtestService(Config config, Func<SpeedTestResult, Task> updateF
         return responseTime;
     }
 
+    /// <summary>
+    ///     自己读流测速:拿到响应头后才开始计时,前 2 秒预热不上报,
+    ///     之后每秒上报最近 3 秒的平均速度(MB/s)。
+    ///     测速超时视为正常结束,最后一次上报的值即为保存值。
+    /// </summary>
     private async Task DoSpeedTest(ServerTestItem it,
         ConcurrentDictionary<string, byte> completedIds, CancellationToken ct = default)
     {
         await UpdateFunc(it.IndexId, "", ResUI.Speedtesting);
 
-        var handler = HttpClientHelper.CreateProxySocketsHttpHandler(it.Port, new());
         var url = _config.SpeedTestItem.SpeedTestUrl;
         var timeout = _config.SpeedTestItem.SpeedTestTimeout;
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeout));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         var linkedCt = linkedCts.Token;
-        using var downloadHandle = new DownloadService
+
+        var handler = HttpClientHelper.CreateProxySocketsHttpHandler(it.Port, new());
+        using var client = new HttpClient(handler, true)
         {
-            Handler = handler,
-            DisposeHandler = true,
+            Timeout = Timeout.InfiniteTimeSpan, // 超时由 timeoutCts 控制
         };
-        await downloadHandle.DownloadDataAsync(url, async (success, msg) =>
+
+        var meter = new SpeedMeter(warmupSec: 2.0, windowSec: 3.0, reportSec: 1.0);
+        var sw = new Stopwatch();
+        var buffer = new byte[64 * 1024];
+        long total = 0;
+        var hasValue = false;
+        var failed = false;
+
+        async Task Report(double mbps)
         {
-            decimal.TryParse(msg, out var dec);
-            if (dec > 0)
+            var rounded = Math.Round((decimal)mbps, 1);
+            if (rounded > 0)
             {
-                ProfileExManager.Instance.SetTestSpeed(it.IndexId, dec);
+                ProfileExManager.Instance.SetTestSpeed(it.IndexId, rounded);
             }
-            await UpdateFunc(it.IndexId, "", msg);
-        }, linkedCt);
+            await UpdateFunc(it.IndexId, "", rounded.ToString("#0.0"));
+        }
+
+        try
+        {
+            using var resp = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, linkedCt);
+            resp.EnsureSuccessStatusCode();
+            await using var stream = await resp.Content.ReadAsStreamAsync(linkedCt);
+
+            sw.Start(); // 拿到响应头后才计时,排除代理建链和 TLS 握手
+            int n;
+            while ((n = await stream.ReadAsync(buffer.AsMemory(), linkedCt)) > 0)
+            {
+                total += n;
+                var mbps = meter.Update(sw.Elapsed.TotalSeconds, total);
+                if (mbps is { } v)
+                {
+                    hasValue = true;
+                    await Report(v);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // 用户手动停止
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        {
+            // 到达测速时长,正常结束
+        }
+        catch (Exception ex)
+        {
+            failed = true;
+            Logging.SaveLog(_tag, ex);
+            await UpdateFunc(it.IndexId, "", ex.Message);
+        }
+
+        if (!failed && !hasValue)
+        {
+            // 没熬过预热就结束了(超时太短或文件太小):退化为整体平均
+            var sec = sw.Elapsed.TotalSeconds;
+            if (total > 0 && sec > 0)
+            {
+                await Report(total / sec / 1_000_000.0);
+            }
+            else
+            {
+                await UpdateFunc(it.IndexId, "", "0");
+            }
+        }
+
         completedIds.TryAdd(it.IndexId, 0);
     }
 
