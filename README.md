@@ -15,14 +15,7 @@
 
 ---
 
-## Download / 下载
-
-Download the latest release here:
-
-在这里下载最新版本：
-
-[https://github.com/2dust/v2rayN/releases](https://github.com/2dust/v2rayN/releases)
-
+主要改动在测试下载速度逻辑，避免类似100Mbps宽带测试20  30 40MB/S大幅度溢出的结果
 
 > [!TIP]
 > v2rayN is the desktop version. For the mobile version, please visit the v2rayNG \
