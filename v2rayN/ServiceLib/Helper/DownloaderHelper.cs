@@ -8,7 +8,7 @@ namespace ServiceLib.Helper;
 ///     预热 + 滑动窗口测速计算器。
 ///     预热期内不上报;预热后每隔 reportSec 返回最近 windowSec 秒内的平均速度(MB/s)。
 /// </summary>
-public sealed class SpeedMeter(double warmupSec = 2.0, double windowSec = 3.0, double reportSec = 1.0)
+public sealed class SpeedMeter(double warmupSec = 0.5, double windowSec = 10.0, double reportSec = 0.6)
 {
     private readonly Queue<(double T, long Bytes)> _samples = new();
     private readonly Lock _lock = new();
