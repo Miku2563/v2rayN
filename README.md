@@ -15,7 +15,7 @@
 
 ---
 
-主要改动在测试下载速度逻辑，避免类似100Mbps宽带测试20  30 40MB/S大幅度溢出的结果
+主要改动在测试下载速度逻辑，避免类似100Mbps宽带测出20  30 40MB/S大幅度溢出的结果
 
 > [!TIP]
 > v2rayN is the desktop version. For the mobile version, please visit the v2rayNG \
