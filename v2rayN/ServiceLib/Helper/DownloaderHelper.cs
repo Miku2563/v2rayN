@@ -1,7 +1,67 @@
+using System.Diagnostics;
 using Downloader;
 using DownloadService = Downloader.DownloadService;
 
 namespace ServiceLib.Helper;
+
+/// <summary>
+///     预热 + 滑动窗口测速计算器。
+///     预热期内不上报;预热后每隔 reportSec 返回最近 windowSec 秒内的平均速度(MB/s)。
+/// </summary>
+public sealed class SpeedMeter(double warmupSec = 2.0, double windowSec = 3.0, double reportSec = 1.0)
+{
+    private readonly Queue<(double T, long Bytes)> _samples = new();
+    private readonly Lock _lock = new();
+    private bool _warmed;
+    private double _lastReport;
+
+    /// <summary>
+    ///     传入"从开始计时到现在的秒数"和"累计已接收字节数"。
+    ///     需要上报时返回速度(MB/s),否则返回 null。
+    /// </summary>
+    public double? Update(double elapsedSec, long totalBytes)
+    {
+        lock (_lock)
+        {
+            if (!_warmed)
+            {
+                if (elapsedSec < warmupSec)
+                {
+                    return null;
+                }
+
+                // 预热结束,以此刻作为窗口起点
+                _warmed = true;
+                _samples.Enqueue((elapsedSec, totalBytes));
+                _lastReport = elapsedSec;
+                return null;
+            }
+
+            _samples.Enqueue((elapsedSec, totalBytes));
+
+            // 丢掉窗口之外的旧样本,至少保留一个
+            while (_samples.Count > 1 && elapsedSec - _samples.Peek().T > windowSec)
+            {
+                _samples.Dequeue();
+            }
+
+            if (elapsedSec - _lastReport < reportSec)
+            {
+                return null;
+            }
+
+            var first = _samples.Peek();
+            var dt = elapsedSec - first.T;
+            if (dt <= 0)
+            {
+                return null;
+            }
+
+            _lastReport = elapsedSec;
+            return (totalBytes - first.Bytes) / dt / 1_000_000.0;
+        }
+    }
+}
 
 public class DownloaderHelper : IDisposable
 {
@@ -64,48 +124,59 @@ public class DownloaderHelper : IDisposable
             CustomHttpMessageHandlerFactory = GetHandler,
         };
 
-        var lastUpdateTime = DateTime.Now;
+        var meter = new SpeedMeter(warmupSec: 2.0, windowSec: 3.0, reportSec: 1.0);
+        var sw = new Stopwatch();
         var hasValue = false;
-        double maxSpeed = 0;
+        long received = 0;
+
         await using var downloader = new DownloadService(downloadOpt);
+
+        // 从下载真正开始才计时,排除建链等待
+        downloader.DownloadStarted += (sender, value) =>
+        {
+            sw.Restart();
+        };
 
         downloader.DownloadProgressChanged += (sender, value) =>
         {
-            if (!(value.BytesPerSecondSpeed > 0))
+            if (!sw.IsRunning)
+            {
+                sw.Start();
+            }
+
+            received = value.ReceivedBytesSize;
+            var mbps = meter.Update(sw.Elapsed.TotalSeconds, received);
+            if (mbps is { } m)
+            {
+                hasValue = true;
+                onProgress.Invoke(m.ToString("#0.0"));
+            }
+        };
+
+        downloader.DownloadFileCompleted += (sender, value) =>
+        {
+            // 已经有窗口速度上报过,就以最后一次上报为准,不再覆盖
+            if (hasValue)
             {
                 return;
             }
-            hasValue = true;
-            if (value.BytesPerSecondSpeed > maxSpeed)
-            {
-                maxSpeed = value.BytesPerSecondSpeed;
-            }
 
-            var ts = DateTime.Now - lastUpdateTime;
-            if (ts.TotalMilliseconds >= 1000)
+            if (value.Error != null)
             {
-                lastUpdateTime = DateTime.Now;
-                var speed = (maxSpeed / 1000 / 1000).ToString("#0.0");
-                onProgress.Invoke(speed);
+                onProgress.Invoke(value.Error.Message);
             }
-        };
-        downloader.DownloadFileCompleted += (sender, value) =>
-        {
-            if (hasValue && maxSpeed > 0)
+            else if (received > 0 && sw.Elapsed.TotalSeconds > 0)
             {
-                var finalSpeed = (maxSpeed / 1000 / 1000).ToString("#0.0");
-                onProgress.Invoke(finalSpeed);
-            }
-            else if (value.Error != null)
-            {
-                onProgress.Invoke(value.Error?.Message);
+                // 时间太短没熬过预热,退化为整体平均
+                var avg = received / sw.Elapsed.TotalSeconds / 1_000_000.0;
+                onProgress.Invoke(avg.ToString("#0.0"));
             }
             else
             {
                 onProgress.Invoke("0");
             }
         };
-        // progress.Invoke("......");
+
         await using var stream = await downloader.DownloadFileTaskAsync(url, cancellationToken);
     }
 
