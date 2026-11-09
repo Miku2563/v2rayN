@@ -554,7 +554,7 @@ public class SpeedtestService(Config config, Func<SpeedTestResult, Task> updateF
             Timeout = Timeout.InfiniteTimeSpan, // 超时由 timeoutCts 控制
         };
 
-        var meter = new SpeedMeter(warmupSec: 2.0, windowSec: 3.0, reportSec: 1.0);
+        var meter = new SpeedMeter(warmupSec: 0.5, windowSec: 10.0, reportSec: 0.6);
         var sw = new Stopwatch();
         var buffer = new byte[64 * 1024];
         long total = 0;
