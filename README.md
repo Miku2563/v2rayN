@@ -12,7 +12,7 @@
 [![macOS](https://img.shields.io/badge/macOS-supported-000000?logo=apple)](https://github.com/2dust/v2rayN) 
 [![GPG Signed](https://img.shields.io/badge/GPG-signed-4B32C3?logo=gnuprivacyguard)](https://github.com/2dust/v2rayN)
 
-
+测速文件300mb左右 akamai cdn   https://cdn.steamusercontent.com/ugc/9347115753158455822/7BE0FB9392572E8F73CBF7FE3E210EEB48011B87/
 ---
 
 主要改动在测试下载速度逻辑，避免类似100Mbps宽带测出20  30 40MB/S大幅度溢出的结果
