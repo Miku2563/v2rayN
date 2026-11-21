@@ -499,6 +499,9 @@ public class Global
         "https://doh.dns.sb/dns-query",
         "https://doh.opendns.com/dns-query",
         "https://common.dot.dns.yandex.net/dns-query",
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query",
+        "https://1.1.1.1/dns-query,https://8.8.8.8/dns-query",
         "8.8.8.8",
         "1.1.1.1",
         "185.222.222.222",
@@ -578,7 +581,8 @@ public class Global
         "tun",
         "socks",
         "socks2",
-        "socks3"
+        "socks3",
+        "dns-module"
     ];
 
     public static readonly List<string> RuleProtocols =
@@ -720,6 +724,7 @@ public class Global
         @"https://api-ipv4.ip.sb/geoip",
         @"https://api-ipv6.ip.sb/geoip",
         @"https://api.ipapi.is",
+        @"https://api.internetdata.io/myip",
         @""
     ];
 

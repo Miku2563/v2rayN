@@ -412,14 +412,11 @@ public partial class CoreConfigV2rayService
                     }
                     if (Global.KcpHeaderMaskMap.TryGetValue(headerType, out var header))
                     {
-                        kcpFinalmask.udp =
-                        [
-                            new Mask4Ray
-                            {
-                                type = "mkcp-legacy",
-                                settings = new MaskSettings4Ray { header = header },
-                            },
-                        ];
+                        kcpFinalmask.udp.Add(new Mask4Ray
+                        {
+                            type = "mkcp-legacy",
+                            settings = new MaskSettings4Ray { header = header },
+                        });
                     }
                     streamSettings.kcpSettings = kcpSettings;
                     streamSettings.finalmask = (JsonObject)JsonUtils.SerializeToNode(kcpFinalmask);
@@ -659,8 +656,11 @@ public partial class CoreConfigV2rayService
 
                 case "masque":
                     var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    var authValue = $"Basic {Utils.Base64Encode($"{_node.Username}:{_node.Password}")}";
-                    headers.Add("Authorization", authValue);
+                    if (!string.IsNullOrEmpty(_node.Username) || !string.IsNullOrEmpty(_node.Password))
+                    {
+                        var authValue = $"Basic {Utils.Base64Encode($"{_node.Username}:{_node.Password}")}";
+                        headers.Add("Authorization", authValue);
+                    }
                     if (!string.IsNullOrEmpty(protocolExtra?.MasqueHeaders))
                     {
                         var userHeaders = Utils.ParseHeaders(protocolExtra.MasqueHeaders)
